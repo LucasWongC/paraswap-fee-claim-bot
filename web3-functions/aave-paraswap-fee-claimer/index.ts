@@ -3,7 +3,9 @@ import {
   Web3FunctionContext,
 } from "@gelatonetwork/web3-functions-sdk";
 import { Contract } from "@ethersproject/contracts";
-import ky from "ky"; // we recommend using ky as axios doesn't support fetch by default
+import { GelatoRelay } from "@gelatonetwork/relay-sdk";
+import { StaticJsonRpcProvider } from "@ethersproject/providers";
+import { constants } from "ethers";
 
 const AAVE_PARASWAP_FEE_CLAIMER_ABI = [
   {
@@ -31,25 +33,18 @@ const AAVE_PARASWAP_FEE_CLAIMER_ABI = [
   },
 ];
 
-Web3Function.onRun(async (context: Web3FunctionContext) => {
-  const { userArgs, multiChainProvider } = context;
+const relay = new GelatoRelay();
 
-  const provider = multiChainProvider.default();
-  // Retrieve Last oracle update time
-  const feeClaimerAddress = userArgs.address as string;
-  const assets = userArgs.assets as string[];
-
-  if (!feeClaimerAddress) {
-    return { canExec: false, message: "Configuration is not valid" };
-  }
-
+const claimFee = async (
+  chainId: number,
+  address: string,
+  assets: string[],
+  provider: StaticJsonRpcProvider,
+  relayApiKey: string
+) => {
   let feeClaimer: Contract;
   try {
-    feeClaimer = new Contract(
-      feeClaimerAddress,
-      AAVE_PARASWAP_FEE_CLAIMER_ABI,
-      provider
-    );
+    feeClaimer = new Contract(address, AAVE_PARASWAP_FEE_CLAIMER_ABI, provider);
   } catch (err) {
     return { canExec: false, message: `Rpc call failed` };
   }
@@ -59,41 +54,81 @@ Web3Function.onRun(async (context: Web3FunctionContext) => {
 
   const claimableAssets: string[] = [];
   for (let i = 0; i < assets.length; i++) {
-    console.log(`Asset: ${assets[i]} - ${balances[i]}`);
+    console.log(`Chain: ${chainId} - Asset: ${assets[i]}: ${balances[i]}`);
     if (balances?.[i] ?? balances?.[i] > 0n) {
       claimableAssets.push(assets[i]);
     }
   }
 
   if (claimableAssets.length > 1) {
-    return {
-      canExec: true,
-      callData: [
-        {
-          to: feeClaimerAddress,
-          data: feeClaimer.interface.encodeFunctionData(
-            "batchClaimToCollector",
-            [claimableAssets]
-          ),
-        },
-      ],
-    };
+    const result = await relay.callWithSyncFee(
+      {
+        chainId: BigInt(chainId),
+        target: address,
+        data: feeClaimer.interface.encodeFunctionData("batchClaimToCollector", [
+          claimableAssets,
+        ]),
+        feeToken: constants.AddressZero,
+      },
+      {},
+      relayApiKey
+    );
+
+    console.log(result);
   } else if (claimableAssets.length == 1) {
-    return {
-      canExec: true,
-      callData: [
-        {
-          to: feeClaimerAddress,
-          data: feeClaimer.interface.encodeFunctionData("claimToCollector", [
-            claimableAssets[0],
-          ]),
-        },
-      ],
-    };
+    const result = await relay.callWithSyncFee(
+      {
+        chainId: BigInt(chainId),
+        target: address,
+        data: feeClaimer.interface.encodeFunctionData("claimToCollector", [
+          claimableAssets[0],
+        ]),
+        feeToken: constants.AddressZero,
+      },
+      {},
+      relayApiKey
+    );
+
+    console.log(result);
   } else {
-    return {
-      canExec: false,
-      message: "There aren't claimable balance",
-    };
+    console.log("Doesn't have claimable token!");
   }
+};
+
+Web3Function.onRun(async (context: Web3FunctionContext) => {
+  const { userArgs, multiChainProvider, secrets } = context;
+
+  const relayApiKey = await secrets.get("RELAY_API_KEY");
+  if (!relayApiKey) {
+    return { canExec: false, message: "Sponsor Api Key not configured" };
+  }
+
+  const { chainIds, addresses, assets } = userArgs as {
+    chainIds: number[];
+    addresses: string[];
+    assets: string[];
+  };
+
+  if (
+    chainIds?.length != addresses?.length ||
+    chainIds?.length != assets?.length ||
+    !chainIds?.length
+  ) {
+    return { canExec: false, message: "Configuration is not valid" };
+  }
+
+  for (let i = 0; i < chainIds.length; i++) {
+    await claimFee(
+      chainIds[i],
+      addresses[i],
+      assets[i].split(","),
+      multiChainProvider.chainId(chainIds[i]),
+      relayApiKey
+    );
+  }
+
+  return {
+    canExec: false,
+    message: "Succeed!",
+  };
 });
