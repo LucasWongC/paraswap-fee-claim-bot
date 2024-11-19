@@ -33,24 +33,57 @@ const AAVE_PARASWAP_FEE_CLAIMER_ABI = [
   },
 ];
 
+const AAVE_DATA_PROVIDER_ABI = [
+  {
+    inputs: [],
+    name: "getAllReservesTokens",
+    outputs: [
+      {
+        components: [
+          { internalType: "string", name: "symbol", type: "string" },
+          { internalType: "address", name: "tokenAddress", type: "address" },
+        ],
+        internalType: "struct IPoolDataProvider.TokenData[]",
+        name: "",
+        type: "tuple[]",
+      },
+    ],
+    stateMutability: "view",
+    type: "function",
+  },
+];
+
 const relay = new GelatoRelay();
 
 const claimFee = async (
   chainId: number,
-  address: string,
-  assets: string[],
+  feeClaimer: string,
+  dataProvider: string,
   provider: StaticJsonRpcProvider,
   relayApiKey: string
 ) => {
-  let feeClaimer: Contract;
+  let feeClaimerContract: Contract;
+  let dataProviderContract: Contract;
   try {
-    feeClaimer = new Contract(address, AAVE_PARASWAP_FEE_CLAIMER_ABI, provider);
+    feeClaimerContract = new Contract(
+      feeClaimer,
+      AAVE_PARASWAP_FEE_CLAIMER_ABI,
+      provider
+    );
+    dataProviderContract = new Contract(
+      dataProvider,
+      AAVE_DATA_PROVIDER_ABI,
+      provider
+    );
   } catch (err) {
     return { canExec: false, message: `Rpc call failed` };
   }
 
+  const allAssetsWithSymbol = await dataProviderContract.getAllReservesTokens();
+  const assets = allAssetsWithSymbol.map((item: any) => item.tokenAddress);
+
   // get claimable assets balance
-  const balances: bigint[] = await feeClaimer.batchGetClaimable(assets);
+  const balances: bigint[] = await feeClaimerContract.batchGetClaimable(assets);
 
   const claimableAssets: string[] = [];
   for (let i = 0; i < assets.length; i++) {
@@ -64,10 +97,11 @@ const claimFee = async (
     const result = await relay.callWithSyncFee(
       {
         chainId: BigInt(chainId),
-        target: address,
-        data: feeClaimer.interface.encodeFunctionData("batchClaimToCollector", [
-          claimableAssets,
-        ]),
+        target: feeClaimer,
+        data: feeClaimerContract.interface.encodeFunctionData(
+          "batchClaimToCollector",
+          [claimableAssets]
+        ),
         feeToken: constants.AddressZero,
       },
       {},
@@ -79,10 +113,11 @@ const claimFee = async (
     const result = await relay.callWithSyncFee(
       {
         chainId: BigInt(chainId),
-        target: address,
-        data: feeClaimer.interface.encodeFunctionData("claimToCollector", [
-          claimableAssets[0],
-        ]),
+        target: feeClaimer,
+        data: feeClaimerContract.interface.encodeFunctionData(
+          "claimToCollector",
+          [claimableAssets[0]]
+        ),
         feeToken: constants.AddressZero,
       },
       {},
@@ -103,15 +138,15 @@ Web3Function.onRun(async (context: Web3FunctionContext) => {
     return { canExec: false, message: "Sponsor Api Key not configured" };
   }
 
-  const { chainIds, addresses, assets } = userArgs as {
+  const { chainIds, feeClaimers, dataProviders } = userArgs as {
     chainIds: number[];
-    addresses: string[];
-    assets: string[];
+    feeClaimers: string[];
+    dataProviders: string[];
   };
 
   if (
-    chainIds?.length != addresses?.length ||
-    chainIds?.length != assets?.length ||
+    chainIds?.length != feeClaimers?.length ||
+    chainIds?.length != dataProviders?.length ||
     !chainIds?.length
   ) {
     return { canExec: false, message: "Configuration is not valid" };
@@ -120,8 +155,8 @@ Web3Function.onRun(async (context: Web3FunctionContext) => {
   for (let i = 0; i < chainIds.length; i++) {
     await claimFee(
       chainIds[i],
-      addresses[i],
-      assets[i].split(","),
+      feeClaimers[i],
+      dataProviders[i],
       multiChainProvider.chainId(chainIds[i]),
       relayApiKey
     );

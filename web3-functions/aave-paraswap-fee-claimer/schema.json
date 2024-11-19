@@ -5,7 +5,7 @@
   "timeout": 30,
   "userArgs": {
     "chainIds": "number[]",
-    "addresses": "string[]",
-    "assets": "string[]"
+    "feeClaimers": "string[]",
+    "dataProviders": "string[]"
   }
 }
